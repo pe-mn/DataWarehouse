@@ -6,6 +6,7 @@ config = configparser.ConfigParser()
 config.read('dwh.cfg')
 
 ARN                    = config.get('IAM_ROLE','ARN')
+LOG_JSONPATH           = config.get('S3','LOG_JSONPATH')
 LOG_DATA               = config.get('S3','LOG_DATA')
 SONG_DATA              = config.get('S3','SONG_DATA')
 
@@ -35,7 +36,7 @@ time_table_drop = "DROP TABLE IF EXISTS dimTime"
 # Note
 # The SERIAL command in Postgres is not supported in Redshift. The equivalent in redshift is IDENTITY(0,1), which you can read more on in the Redshift Create Table Docs.
 
-
+# -------------------------------------------------------------------------------------------------------------------------------
 
 # CREATE TABLES
 # Amazon Redshift defaults the sort key and distribution style to AUTO
@@ -43,6 +44,8 @@ time_table_drop = "DROP TABLE IF EXISTS dimTime"
 # https://knowledge.udacity.com/questions/707168
 # https://knowledge.udacity.com/questions/394360
 # https://knowledge.udacity.com/questions/47434
+
+# :warning: In the staging_events table, The registration field's data type is incorrect. It should be VARCHAR instead. Looking at the sample image, they are (as far as we can tell from the screenshot) 12-digit registration codes, and we are not supposed to perform any numerical operations on them:
 
 staging_events_table_create= ("""
 CREATE TABLE IF NOT EXISTS stagingEvents ( 
@@ -57,7 +60,7 @@ CREATE TABLE IF NOT EXISTS stagingEvents (
     location          varchar, 
     method            varchar, 
     page              varchar, 
-    registration      float, 
+    registration      varchar, 
     sessionId         int, 
     song              varchar, 
     status            int, 
@@ -82,17 +85,27 @@ CREATE TABLE IF NOT EXISTS stagingSongs (
 """)
 
 
+# -------------------------------------------------------------------------------------------------------------------------------
+
+
+# PRIMARY KEY constraints need to be set for all index fields in your dimension and fact tables.
+
+# Please include NOT NULL constraints where appropriate.
+# A song should have a title, an artist should have a name, a user should have a first name, etc.
+
+# According to the documentation from Redshift, the PRIMARY KEY, FOREIGN KEY, and NOT NULL constraints are informational only. Despite that, it is still a best practice to include them in your tables.
+        
 
 # •	songplay_id, start_time, user_id, level, song_id, artist_id, session_id, location, user_agent
 songplay_table_create = ("""
 CREATE TABLE IF NOT EXISTS factSongplay(
-    songplay_id       int               IDENTITY(0,1), 
-    start_time        timestamp         sortkey, 
-    user_id           int, 
+    songplay_id       int               IDENTITY(0,1)   PRIMARY KEY, 
+    start_time        timestamp         NOT NULL        sortkey, 
+    user_id           int               NOT NULL, 
     level             text, 
-    song_id           varchar, 
-    artist_id         varchar, 
-    session_id        int, 
+    song_id           varchar           NOT NULL, 
+    artist_id         varchar           NOT NULL, 
+    session_id        int               NOT NULL, 
     location          varchar,
     user_agent        varchar)
     diststyle auto;
@@ -101,8 +114,8 @@ CREATE TABLE IF NOT EXISTS factSongplay(
 # user_id, first_name, last_name, gender, level
 user_table_create = ("""
 CREATE TABLE IF NOT EXISTS dimUser(
-    user_id           int               sortkey,
-    first_name        varchar,
+    user_id           int               sortkey         PRIMARY KEY,
+    first_name        varchar           NOT NULL,
     last_name         varchar,
     gender            char,
     level             text)
@@ -111,8 +124,8 @@ CREATE TABLE IF NOT EXISTS dimUser(
 
 song_table_create = ("""
     CREATE TABLE IF NOT EXISTS dimSong(
-    song_id           varchar, 
-    title             varchar, 
+    song_id           varchar                           PRIMARY KEY, 
+    title             varchar           NOT NULL, 
     artist_id         varchar, 
     year              int               sortkey,               
     duration          numeric)
@@ -122,8 +135,8 @@ song_table_create = ("""
 # https://stackoverflow.com/questions/8150721/which-data-type-for-latitude-and-longitude
 artist_table_create = ("""
 CREATE TABLE IF NOT EXISTS dimArtist(
-    artist_id         varchar,
-    name              varchar, 
+    artist_id         varchar                            PRIMARY KEY,
+    name              varchar            NOT NULL, 
     location          varchar, 
     latitude          double precision, 
     longitude         double precision)
@@ -132,31 +145,38 @@ CREATE TABLE IF NOT EXISTS dimArtist(
 
 time_table_create = ("""
 CREATE TABLE IF NOT EXISTS dimTime(
-    start_time        timestamp          sortkey, 
-    hour              int, 
-    day               int, 
-    week              int, 
-    month             int, 
-    year              int, 
-    weekday           int) 
+    start_time        timestamp          sortkey         PRIMARY KEY, 
+    hour              int                NOT NULL, 
+    day               int                NOT NULL, 
+    week              int                NOT NULL, 
+    month             int                NOT NULL, 
+    year              int                NOT NULL, 
+    weekday           int                NOT NULL) 
     diststyle auto;
 """)
 
 
+# -------------------------------------------------------------------------------------------------------------------------------
 
 
 # STAGING TABLES
 
+# config["S3"]["LOG_JSONPATH"] setting needs to be used for the JSON parameter when running the COPY query for staging_events. Failing to do this would lead to empty data for many fields. 
+# On the contrary, for the staging_songs table, you should use the "JSON auto" setting.
+        
 # https://knowledge.udacity.com/questions/137878
+# https://knowledge.udacity.com/questions/39352
+# https://www.bmc.com/blogs/amazon-redshift-copy-json-data/
+
 staging_events_copy = (f"""
     copy stagingEvents from {LOG_DATA}
-    credentials 'aws_iam_role={ARN}'
-    json 'auto'
-    TIMEFORMAT 'epochmillisecs'
-    COMPUPDATE OFF
+    iam_role '{ARN}'
+    json {LOG_JSONPATH}
+    TIMEFORMAT 'epochmillisecs'  
     region 'us-west-2';   
 """)
 
+#     COMPUPDATE OFF  
 
 
 staging_songs_copy = (f"""
@@ -167,6 +187,7 @@ staging_songs_copy = (f"""
 """)
 
 
+# -------------------------------------------------------------------------------------------------------------------------------
 
 
 # FINAL TABLES
@@ -181,9 +202,9 @@ songplay_table_insert = ("""
                     sessionId,
                     location,
                     userAgent                    
-    From stagingEvents E LEFT Join stagingSongs S 
-        ON  E.song = S.title
-        AND E.artist = S.artist_name  
+    From stagingSongs S LEFT Join stagingEvents E
+        ON  S.title = E.song
+        AND S.artist_name = E.artist
     WHERE E.page='NextSong' 
 """)
 
@@ -249,9 +270,11 @@ time_table_insert = ("""
             EXTRACT (YEAR    FROM start_time), 
             EXTRACT (WEEKDAY FROM start_time) 
     FROM stagingEvents
+    WHERE ts IS NOT NULL
 """)
 
 
+# -------------------------------------------------------------------------------------------------------------------------------
 
 
 
